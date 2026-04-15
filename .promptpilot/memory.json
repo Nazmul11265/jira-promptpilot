@@ -1,0 +1,31 @@
+{
+  "MOCK-001": {
+    "ticketSummary": "MOCK-001",
+    "filesRead": [
+      "test-agent.js"
+    ],
+    "searchQueries": [
+      "mock ticket"
+    ],
+    "rootCause": "Mock root cause",
+    "fixApproach": "Mock fix approach",
+    "relevantFiles": [
+      "test-agent.js"
+    ],
+    "lastUpdated": "2026-04-15T17:40:06.354Z"
+  },
+  "P1794-226": {
+    "ticketSummary": "[SP1][UI] Login button is showing as Inactive though it’s filled up with Saved Credentials.",
+    "filesRead": [],
+    "searchQueries": [
+      "login button inactive saved credentials",
+      "login button inactive",
+      "login functionality",
+      "login button inactive saved credentials"
+    ],
+    "rootCause": "UNVERIFIED — application source files not found in this workspace",
+    "fixApproach": "Point the workspace root at the target application repository and re-run PromptPilot.",
+    "relevantFiles": [],
+    "lastUpdated": "2026-04-15T18:24:35.705Z"
+  }
+}

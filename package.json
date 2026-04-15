@@ -1,0 +1,20 @@
+{
+  "name": "jira-promptpilot",
+  "version": "1.0.0",
+  "description": "Agentic MCP server: analyzes Jira tickets via ReAct loop (Groq/Llama) and generates optimal VS Code Copilot prompts",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.2",
+    "dotenv": "^16.5.0",
+    "glob": "^11.0.2",
+    "groq-sdk": "^0.21.0"
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "servers": {
+    "jira-promptpilot": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${workspaceFolder}/src/index.js"],
+      "env": {
+        "GROQ_API_KEY": "${input:groqApiKey}",
+        "GROQ_MODEL": "llama-3.1-8b-instant",
+        "JIRA_BASE_URL": "${input:jiraBaseUrl}",
+        "JIRA_EMAIL": "${input:jiraEmail}",
+        "JIRA_API_TOKEN": "${input:jiraApiToken}",
+        "DEFAULT_WORKSPACE_ROOT": "${workspaceFolder}"
+      }
+    }
+  },
+  "inputs": [
+    {
+      "id": "groqApiKey",
+      "type": "promptString",
+      "description": "Groq API Key",
+      "password": true
+    },
+    {
+      "id": "jiraBaseUrl",
+      "type": "promptString",
+      "description": "Jira Base URL (e.g. https://company.atlassian.net)",
+      "default": ""
+    },
+    {
+      "id": "jiraEmail",
+      "type": "promptString",
+      "description": "Jira account email",
+      "default": ""
+    },
+    {
+      "id": "jiraApiToken",
+      "type": "promptString",
+      "description": "Jira API Token",
+      "password": true
+    }
+  ]
+}
