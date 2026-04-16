@@ -53,10 +53,6 @@ After EVERY tool result, write:
 2. You MUST keep calling tool functions until you call generate_prompt.
    Do NOT stop mid-investigation. Do NOT return a partial response.
 3. If you are about to type "ACT:" as text, STOP and call the real function instead.
-4. NEVER use XML-style or angle-bracket-style function calls such as
-   <function=tool_name {"arg":"value"}></function>  — this format is INVALID.
-   Tool calls MUST be made exclusively through the API's structured tool_calls mechanism.
-   Any text that looks like <function=...> in your output will cause a hard API error.
 
 ## Workflow (follow this order)
 
@@ -195,6 +191,7 @@ const TOOL_DEFINITIONS = [
         required: [
           'ticket_summary',
           'root_cause',
+          'relevant_files',
           'fix_approach',
         ],
       },
@@ -245,7 +242,7 @@ async function buildPlan(ticketId, ticketData, priorMemory) {
 
   try {
     const r = await groq.chat.completions.create({
-      model: process.env.GROQ_MODEL ?? 'llama-3.1-8b-instant',
+      model: process.env.GROQ_MODEL ?? 'llama-3.3-70b-versatile',
       messages: [
         { role: 'system', content: PLAN_SYSTEM },
         {
@@ -306,132 +303,6 @@ function logReActSections({ think, observe, reflect }, hasToolCalls, iteration) 
   return false;
 }
 
-// ─── Text-format tool call parser ──────────────────────────────────────────────
-// Fallback for when the model emits a tool call as JSON text instead of using
-// the API's structured tool_calls mechanism.
-// Handles patterns like: {"type":"function","name":"foo","parameters":{...}}
-function parseTextToolCalls(content) {
-  if (!content) return [];
-  const knownNames = new Set(TOOL_DEFINITIONS.map((t) => t.function.name));
-  const results = [];
-
-  // Walk the string looking for '{' and try to extract balanced JSON objects.
-  let i = 0;
-  while (i < content.length) {
-    const start = content.indexOf('{', i);
-    if (start === -1) break;
-
-    let depth = 0;
-    let j = start;
-    let inString = false;
-    let escape = false;
-
-    while (j < content.length) {
-      const ch = content[j];
-      if (escape) { escape = false; j++; continue; }
-      if (ch === '\\' && inString) { escape = true; j++; continue; }
-      if (ch === '"') { inString = !inString; }
-      if (!inString) {
-        if (ch === '{') depth++;
-        else if (ch === '}') { depth--; if (depth === 0) break; }
-      }
-      j++;
-    }
-
-    if (depth === 0) {
-      const candidate = content.slice(start, j + 1);
-      try {
-        const obj = JSON.parse(candidate);
-        // Support multiple text-call shapes:
-        //   {"name":"foo","parameters":{...}}
-        //   {"type":"function","name":"foo","parameters":{...}}
-        //   {"function":{"name":"foo","arguments":{...}}}
-        const name =
-          obj.name ??
-          obj.function?.name;
-        let args =
-          obj.parameters ??
-          obj.arguments ??
-          obj.function?.parameters ??
-          obj.function?.arguments ??
-          {};
-        if (typeof args === 'string') {
-          try { args = JSON.parse(args); } catch { args = {}; }
-        }
-        if (name && knownNames.has(name)) {
-          results.push({ name, args });
-        }
-      } catch {
-        // not valid JSON — skip
-      }
-      i = j + 1;
-    } else {
-      i = start + 1;
-    }
-  }
-
-  return results;
-}
-
-// Parses Groq's XML-ish tool call text from `failed_generation`.
-// Accepts both well-formed and malformed variants, for example:
-//   <function=search_workspace {"query":"..."}></function>
-//   <function=search_workspace {"query":"..."}> THINK: ...
-function parseXmlToolCall(text) {
-  if (!text) return null;
-  const knownNames = new Set(TOOL_DEFINITIONS.map((t) => t.function.name));
-
-  const fnMatch = text.match(/<function=(\w+)\b/);
-  if (!fnMatch) return null;
-
-  const name = fnMatch[1];
-  if (!knownNames.has(name)) return null;
-
-  const jsonStart = text.indexOf('{', fnMatch.index);
-  if (jsonStart === -1) return null;
-
-  // Extract first balanced JSON object after <function=...>
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  let end = -1;
-
-  for (let i = jsonStart; i < text.length; i++) {
-    const ch = text[i];
-    if (escape) {
-      escape = false;
-      continue;
-    }
-    if (ch === '\\' && inString) {
-      escape = true;
-      continue;
-    }
-    if (ch === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (inString) continue;
-
-    if (ch === '{') depth++;
-    if (ch === '}') {
-      depth--;
-      if (depth === 0) {
-        end = i;
-        break;
-      }
-    }
-  }
-
-  if (end === -1) return null;
-
-  try {
-    const args = JSON.parse(text.slice(jsonStart, end + 1));
-    return { name, args };
-  } catch {
-    return null;
-  }
-}
-
 // ─── ReAct Loop ───────────────────────────────────────────────────────────────
 
 const MAX_ITERATIONS = 10;
@@ -440,7 +311,7 @@ export async function runAgent(ticketId, workspaceRoot) {
   console.error(`\n${'═'.repeat(60)}`);
   console.error(`[PromptPilot] Ticket    : ${ticketId}`);
   console.error(`[PromptPilot] Workspace : ${workspaceRoot}`);
-  console.error(`[PromptPilot] Model     : ${process.env.GROQ_MODEL ?? 'llama-3.1-8b-instant'}`);
+  console.error(`[PromptPilot] Model     : ${process.env.GROQ_MODEL ?? 'llama-3.3-70b-versatile'}`);
   console.error(`${'═'.repeat(60)}`);
 
   // ── Phase 1: Cross-run memory ─────────────────────────────────────────────
@@ -513,108 +384,18 @@ export async function runAgent(ticketId, workspaceRoot) {
   // ── Phase 6: ReAct loop ───────────────────────────────────────────────────
   let finalPrompt = null;
   let iteration = 0;
-  let xmlFormatRetries = 0;
 
   while (iteration < MAX_ITERATIONS && finalPrompt === null) {
     iteration++;
     console.error(`\n[Loop] ── Iteration ${iteration} ──────────────────────`);
 
-    let response;
-    try {
-      response = await groq.chat.completions.create({
-        model: process.env.GROQ_MODEL ?? 'llama-3.1-8b-instant',
-        messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
-        tools: TOOL_DEFINITIONS,
-        tool_choice: 'required',
-        temperature: 0.1,
-      });
-    } catch (apiErr) {
-      // Groq raises a 400 tool_use_failed when the model writes
-      // <function=name {args}> XML-style calls instead of using tool_calls.
-      const isToolUseFailed =
-        apiErr?.status === 400 &&
-        (apiErr?.error?.code === 'tool_use_failed' ||
-          String(apiErr?.message ?? '').includes('tool call validation failed'));
-
-      if (!isToolUseFailed) throw apiErr;
-
-      xmlFormatRetries++;
-
-      // ── Try to extract + execute the call from failed_generation ───────
-      // Groq embeds the model's raw output in the error body.
-      const failedGen =
-        apiErr.error?.failed_generation ??
-        (() => {
-          try {
-            const body = JSON.parse(
-              String(apiErr.message ?? '').replace(/^[^{]*/, '')
-            );
-            return body?.error?.failed_generation ?? null;
-          } catch { return null; }
-        })();
-
-      const recovered = parseXmlToolCall(failedGen);
-
-      if (recovered) {
-        console.error(
-          `[Loop] ⚠ XML tool call recovered from error (attempt ${xmlFormatRetries}) — executing "${recovered.name}".`
-        );
-
-        let result;
-        try {
-          result = await executeTool(recovered.name, recovered.args, workspaceRoot);
-        } catch (toolErr) {
-          result = { error: toolErr.message };
-          console.error(`[Error] ${toolErr.message}`);
-        }
-
-        // Update memory tracking
-        if (recovered.name === 'search_workspace')
-          memoryData.searchQueries.push(recovered.args.query);
-        if (recovered.name === 'read_file' && !result?.error &&
-            !memoryData.filesRead.includes(recovered.args.file_path))
-          memoryData.filesRead.push(recovered.args.file_path);
-        if (recovered.name === 'generate_prompt') {
-          memoryData.rootCause    = recovered.args.root_cause;
-          memoryData.fixApproach  = recovered.args.fix_approach;
-          memoryData.relevantFiles = recovered.args.relevant_files ?? [];
-          finalPrompt = result;
-        }
-
-        const preview = JSON.stringify(result).slice(0, 300);
-        console.error(`[OBSERVE xml-recovery] ${preview}${preview.length === 300 ? '…' : ''}`);
-
-        if (finalPrompt !== null) break;
-
-        messages.push({
-          role: 'user',
-          content:
-            `FORMAT ERROR (attempt ${xmlFormatRetries}): You used <function=name {}> syntax which is INVALID.\n` +
-            `The "${recovered.name}" call was recovered and executed. Result:\n` +
-            `${JSON.stringify(result).slice(0, 400)}\n\n` +
-            'CRITICAL: NEVER use <function=...> or any text/XML format. ' +
-            'Use ONLY the API structured tool_calls mechanism. Continue your investigation.',
-        });
-
-        iteration--; // don't count recovery as a real iteration
-        continue;
-      }
-
-      // ── No recovery possible — nudge only ──────────────────────────────
-      console.error(
-        `[Loop] ⚠ XML-format tool call, failed_generation not parseable (attempt ${xmlFormatRetries}) — injecting corrective message.`
-      );
-      messages.push({
-        role: 'user',
-        content:
-          'CRITICAL ERROR: You used an XML-style function call ' +
-          '(<function=tool_name {"arg":"value"}></function>) which caused a 400 API error. ' +
-          'You MUST use the API structured tool_calls mechanism — NEVER write function calls as text or XML. ' +
-          'Retry your last intended action using a proper tool call now.',
-      });
-      iteration--; // don't burn an iteration on this retry
-      continue;
-    }
+    const response = await groq.chat.completions.create({
+      model: process.env.GROQ_MODEL ?? 'llama-3.3-70b-versatile',
+      messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages],
+      tools: TOOL_DEFINITIONS,
+      tool_choice: 'auto',
+      temperature: 0.1,
+    });
 
     const message = response.choices[0].message;
 
@@ -637,56 +418,7 @@ export async function runAgent(ticketId, workspaceRoot) {
 
     // ── No tool calls → model wrote text instead of calling a function ─────
     if (!message.tool_calls || message.tool_calls.length === 0) {
-      // Try to recover: model may have emitted a JSON-text tool call.
-      const textCalls = parseTextToolCalls(message.content ?? '');
-      if (textCalls.length > 0) {
-        console.error(
-          `[Loop] ⚠ Text-format tool call detected — executing ${textCalls.length} call(s) and injecting corrective message.`
-        );
-        // Execute the recovered calls as if they came from tool_calls.
-        const toolResults = [];
-        for (const { name, args } of textCalls) {
-          console.error(`\n[ACT text-fallback]  ${name}  args=${JSON.stringify(args)}`);
-          let result;
-          try {
-            result = await executeTool(name, args, workspaceRoot);
-          } catch (err) {
-            result = { error: err.message };
-            console.error(`[Error] ${err.message}`);
-          }
-          if (name === 'search_workspace') memoryData.searchQueries.push(args.query);
-          if (name === 'read_file' && !result?.error && !memoryData.filesRead.includes(args.file_path))
-            memoryData.filesRead.push(args.file_path);
-          if (name === 'generate_prompt') {
-            memoryData.rootCause    = args.root_cause;
-            memoryData.fixApproach  = args.fix_approach;
-            memoryData.relevantFiles = args.relevant_files ?? [];
-            finalPrompt = result;
-          }
-          const preview = JSON.stringify(result).slice(0, 300);
-          console.error(`[OBSERVE text-fallback] ${preview}${preview.length === 300 ? '…' : ''}`);
-          toolResults.push({ name, result });
-          if (finalPrompt !== null) break;
-        }
-        if (finalPrompt !== null) break;
-        // Inject tool results as context then remind the model to use structured calls.
-        const resultSummary = toolResults
-          .map(({ name, result }) => `${name}: ${JSON.stringify(result).slice(0, 200)}`)
-          .join('\n');
-        messages.push({
-          role: 'user',
-          content:
-            'CRITICAL FORMAT ERROR: You emitted tool calls as raw JSON text instead of ' +
-            'using the API structured tool_calls mechanism. This is invalid. ' +
-            'NEVER output {"type":"function",...}, <function=...>, or any other text-format call. ' +
-            'Always invoke tools through the API tool_calls interface.\n\n' +
-            'The text-format calls were recovered and executed. Results:\n' +
-            resultSummary + '\n\nContinue your investigation using proper tool calls.',
-        });
-        continue;
-      }
-
-      // Count how many times the model has stalled (text-only response, no recoverable calls)
+      // Count how many times the model has stalled (text-only response)
       const stalls = messages.filter(
         (m) => m.role === 'assistant' && (!m.tool_calls || m.tool_calls.length === 0)
       ).length;
@@ -697,9 +429,8 @@ export async function runAgent(ticketId, workspaceRoot) {
           role: 'user',
           content:
             'You wrote reasoning text but did not invoke any tool function. ' +
-            'You MUST call tools using the API structured tool_calls mechanism — ' +
-            'do NOT write tool calls as plain text, JSON, or XML. ' +
-            'Continue your investigation and invoke the next tool now.',
+            'You MUST call the actual tool functions via the API — do NOT write "ACT:" as text. ' +
+            'Continue your investigation and call the next required tool function now.',
         });
         continue; // re-enter the while loop without incrementing
       }
